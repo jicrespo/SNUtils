@@ -25,7 +25,7 @@ gROOT.SetBatch(True)
 gStyle.SetPadTickY(False)
 
 # Canvas divided in 12 for 10 crates
-canvas = TCanvas("analyze_xmit_info_report_run%d" % run, "analyze_xmit_info_report_run%d" % run, 1920, 1080)
+canvas = TCanvas("analyze_xmit_info_report_run%d_v2" % run, "analyze_xmit_info_report_run%d" % run, 1920, 1080)
 canvas.Divide(4,3)
 
 # For two y-axis plots
@@ -40,6 +40,10 @@ g_busy_sn = []
 g_event_nu_diff = []
 g_frame_sn_diff = []
 
+# Overflow/final frame lists, one entry per crate
+crate_overflow_frame = [16777216.]*10 # Max frame value (24 bits)
+crate_final_frame = [16777216.]*10 # Max frame value (24 bits)
+
 # Analyze XMIT Status and Counter Info Report in sebs 1 - 10
 for crate, log in enumerate(log_files):
     crate += 1
@@ -51,6 +55,9 @@ for crate, log in enumerate(log_files):
     trigger = []
     event_nu_diff = []
     frame_sn_diff = []
+    last_frame = 0
+    last_frame_sn = 0
+    crate_overflowed = False
 
     with open(log, "r") as file_to_read:
         for line in file_to_read:
@@ -66,14 +73,29 @@ for crate, log in enumerate(log_files):
             elif "SN busy status        :" in line:
                 busy_sn.append(float(re.findall(r'\d+', line)[0]) + 0.06)
             elif "frame number      :" in line:
-                xmit_frame.append(float(re.findall(r'\d+', line)[0]))
+                frame = float(re.findall(r'\d+', line)[0])
+                #print "frame %.0f last_frame %.0f correct_frame %.0f"% (frame, last_frame, frame+8388608. if (frame < last_frame and frame > 0) else frame)
+                if frame < last_frame and frame > 0: # Frame counter was 23 bit and wrapped around # > 0 to prevent spurious readouts
+                    frame += 8388608. # 2^23 = 8388608
+                xmit_frame.append(frame)
+                if frame > 0: # > 0 to prevent spurious readouts
+                    last_frame = frame
             elif "trigger received  :" in line:
                 trigger.append(float(re.findall(r'\d+', line)[0]))
             elif "packed event (nu) :" in line:
                 event_nu_diff.append(trigger[-1] - float(re.findall(r'\d+', line)[0]) - 0.02) # -0.02 shift
             elif "packed event (sn) :" in line:
-                frame_sn_diff.append(xmit_frame[-1] - float(re.findall(r'\d+', line)[0]))
+                frame_sn = float(re.findall(r'\d+', line)[0])
+                if frame_sn < last_frame_sn and frame_sn > 0: # Frame counter was 23 bit and wrapped around # > 0 to prevent spurious readouts
+                    frame_sn += 8388608. # 2^23 = 8388608
+                frame_sn_diff.append(xmit_frame[-1] - frame_sn)
+                if frame_sn > 0: # > 0 to prevent spurious readouts
+                    last_frame_sn = frame_sn
+                    if frame_sn_diff[-1] > 512 and not crate_overflowed: # FEM FIFO max capacity
+                        crate_overflow_frame[crate - 1] = xmit_frame[-1]
+                        crate_overflowed = True
 
+    crate_final_frame[crate - 1] = xmit_frame[-4] # Ignore last 3 entries
     frame_array = np.array(xmit_frame,'d')
 
     # Create TGraphs from patterns above as a function of XMIT frame
@@ -172,7 +194,7 @@ gPad.BuildLegend(0,0,1,1, "XMIT Info Run %d" % run)
 canvas.SaveAs(".png")
 
 # Output ROOT file
-outfile = TFile("analyze_xmit_info_report_run%d.root" % run, "RECREATE")
+outfile = TFile("analyze_xmit_info_report_run%d_v2.root" % run, "RECREATE")
 
 canvas.Write()
 
@@ -195,3 +217,14 @@ for g in g_frame_sn_diff:
     g.Write()
 
 outfile.Close()
+
+# Find earliest crate and frame with SN overflow
+min_overflow_frame = 16777216. # Max frame value (24 bits)
+overflow_crate = -1
+final_frame = max(crate_final_frame)
+for c in xrange(0, len(crate_overflow_frame)):
+    if (crate_overflow_frame[c] < min_overflow_frame) and (crate_overflow_frame[c] < final_frame):
+        min_overflow_frame = crate_overflow_frame[c]
+        overflow_crate = c + 1
+
+print "run %5d overflow_crate %2d overflow_frame %8.0f final_frame %8.0f" % (run, overflow_crate, min_overflow_frame, final_frame)
